@@ -21,14 +21,17 @@ def normalize_url(url: str) -> str:
     )).lower()
 
 
-async def process_url(url, depth, queue, visited, visited_hashes, browser, base_url,
-                       max_depth, exclude_texts, pdf_info, semaphore):
+async def process_url(url, depth, queue, visited, visited_hashes, base_url,
+                       max_depth, exclude_texts, pdf_info, semaphore, timeout, context):
     async with semaphore:
         normalized_url = normalize_url(url)
-        context = await browser.new_context()
         page = await context.new_page()
         try:
-            await page.goto(url, wait_until="networkidle")
+            await page.goto(url, wait_until="load", timeout=timeout)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=5000)
+            except Exception:
+                pass
             content = await page.content()
             content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
             if content_hash in visited_hashes:
@@ -59,7 +62,6 @@ async def process_url(url, depth, queue, visited, visited_hashes, browser, base_
             print(f"Error: {url}: {e}")
         finally:
             await page.close()
-            await context.close()
 
 
 async def worker(queue, active, *args):
@@ -75,18 +77,20 @@ async def worker(queue, active, *args):
                 break
 
 
-async def run(root_url: str, exclude: list, max_depth: int, concurrency: int):
+async def run(root_url: str, exclude: list, max_depth: int, concurrency: int, timeout: int):
     OUTPUT_DIR.mkdir(exist_ok=True)
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context()
         visited, visited_hashes, pdf_info, active = set(), set(), [], [0]
         queue, semaphore = asyncio.Queue(), asyncio.Semaphore(concurrency)
         visited.add(normalize_url(root_url))
         await queue.put((root_url, 0))
 
-        workers = [asyncio.create_task(worker(queue, active, visited, visited_hashes, browser,
-                   root_url, max_depth, exclude, pdf_info, semaphore)) for _ in range(concurrency)]
+        workers = [asyncio.create_task(worker(queue, active, visited, visited_hashes,
+                   root_url, max_depth, exclude, pdf_info, semaphore, timeout, context)) for _ in range(concurrency)]
         await asyncio.gather(*workers)
+        await context.close()
         await browser.close()
 
     if pdf_info:
@@ -116,9 +120,10 @@ def main(
     root_url: str = typer.Argument(..., help="Root URL"),
     exclude: list[str] = typer.Option([], "-e", "--exclude", help="Exclude links"),
     level: int = typer.Option(1, "-L", "--level", help="Max depth"),
-    concurrency: int = typer.Option(50, "-c", "--concurrency", help="Concurrent pages"),
+    concurrency: int = typer.Option(34, "-c", "--concurrency", help="Concurrent pages"),
+    timeout: int = typer.Option(60000, "-t", "--timeout", help="Page load timeout in ms"),
 ):
-    asyncio.run(run(root_url, exclude, level, concurrency))
+    asyncio.run(run(root_url, exclude, level, concurrency, timeout))
 
 
 if __name__ == "__main__":
