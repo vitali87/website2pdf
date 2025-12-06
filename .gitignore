@@ -84,3 +84,7 @@ cython_debug/
 .claude
 final_combined_output.pdf
 website_pdfs/
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat
+.gitignore

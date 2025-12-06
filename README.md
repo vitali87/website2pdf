@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo/wtp.png" alt="WTP Logo" width="200">
+  <img src="logo/wtp-logo.png" alt="WTP Logo" width="200">
 </p>
 
 # Web-to-PDF Crawler
