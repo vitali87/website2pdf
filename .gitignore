@@ -82,4 +82,5 @@ dmypy.json
 cython_debug/
 .idea/
 .claude
-website_pdfs
+final_combined_output.pdf
+website_pdfs/

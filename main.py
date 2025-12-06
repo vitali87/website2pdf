@@ -21,54 +21,77 @@ def normalize_url(url: str) -> str:
     )).lower()
 
 
-async def crawl_and_save_pdf(url, visited, visited_hashes, browser, base_url,
-                              depth, max_depth, exclude_texts, pdf_info):
-    normalized_url = normalize_url(url)
-    if normalized_url in visited or depth > max_depth:
-        return
-    visited.add(normalized_url)
+async def process_url(url, depth, queue, visited, visited_hashes, browser, base_url,
+                       max_depth, exclude_texts, pdf_info, semaphore):
+    async with semaphore:
+        normalized_url = normalize_url(url)
+        context = await browser.new_context()
+        page = await context.new_page()
+        try:
+            await page.goto(url, wait_until="networkidle")
+            content = await page.content()
+            content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            if content_hash in visited_hashes:
+                return
+            visited_hashes.add(content_hash)
 
-    context = await browser.new_context()
-    page = await context.new_page()
+            sanitized_url = re.sub(r"[^a-zA-Z0-9]", "_", normalized_url)
+            page_path = OUTPUT_DIR / f"{sanitized_url}.pdf"
+            await page.pdf(path=str(page_path))
+            print(f"Saved: {url}")
 
-    try:
-        await page.goto(url, wait_until="networkidle")
-        content = await page.content()
-        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            soup = BeautifulSoup(content, "html.parser")
+            title = (h1.get_text(strip=True) if (h1 := soup.find("h1")) and h1.get_text(strip=True)
+                     else await page.title())
+            pdf_info.append({"title": title, "file_path": str(page_path), "url": normalized_url})
 
-        if content_hash in visited_hashes:
-            print(f"Duplicate content found at {url}, skipping.")
-            return
-        visited_hashes.add(content_hash)
+            if depth < max_depth:
+                base_netloc = urlparse(base_url).netloc
+                for tag in soup.find_all("a", href=True):
+                    next_url = urljoin(base_url, tag["href"])
+                    normalized_next = normalize_url(next_url)
+                    if (urlparse(normalized_next).netloc == base_netloc and
+                        normalized_next not in visited and
+                        not any(ex.lower() in tag.get_text(strip=True).lower() for ex in exclude_texts)):
+                        visited.add(normalized_next)
+                        await queue.put((next_url, depth + 1))
+        except Exception as e:
+            print(f"Error: {url}: {e}")
+        finally:
+            await page.close()
+            await context.close()
 
-        sanitized_url = re.sub(r"[^a-zA-Z0-9]", "_", normalized_url)
-        page_path = OUTPUT_DIR / f"{sanitized_url}.pdf"
-        await page.pdf(path=str(page_path))
-        print(f"Saved: {url} to {page_path}")
 
-        soup = BeautifulSoup(content, "html.parser")
-        title = (h1.get_text(strip=True) if (h1 := soup.find("h1")) and h1.get_text(strip=True)
-                 else await page.title())
-        pdf_info.append({"title": title, "file_path": str(page_path)})
+async def worker(queue, active, *args):
+    while True:
+        try:
+            url, depth = await asyncio.wait_for(queue.get(), timeout=1.0)
+            active[0] += 1
+            await process_url(url, depth, queue, *args)
+            active[0] -= 1
+            queue.task_done()
+        except asyncio.TimeoutError:
+            if active[0] == 0 and queue.empty():
+                break
 
-        base_netloc = urlparse(base_url).netloc
-        for link_tag in soup.find_all("a", href=True):
-            link_text = link_tag.get_text(strip=True)
-            next_url = urljoin(base_url, link_tag["href"])
-            normalized_next = normalize_url(next_url)
 
-            if (any(ex.lower() in link_text.lower() for ex in exclude_texts) or
-                urlparse(normalized_next).netloc != base_netloc or
-                normalized_next in visited):
-                continue
+async def run(root_url: str, exclude: list, max_depth: int, concurrency: int):
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        visited, visited_hashes, pdf_info, active = set(), set(), [], [0]
+        queue, semaphore = asyncio.Queue(), asyncio.Semaphore(concurrency)
+        visited.add(normalize_url(root_url))
+        await queue.put((root_url, 0))
 
-            await crawl_and_save_pdf(next_url, visited, visited_hashes, browser,
-                                      base_url, depth + 1, max_depth, exclude_texts, pdf_info)
-    except Exception as e:
-        print(f"Error visiting {url}: {e}")
-    finally:
-        await page.close()
-        await context.close()
+        workers = [asyncio.create_task(worker(queue, active, visited, visited_hashes, browser,
+                   root_url, max_depth, exclude, pdf_info, semaphore)) for _ in range(concurrency)]
+        await asyncio.gather(*workers)
+        await browser.close()
+
+    if pdf_info:
+        pdf_info.sort(key=lambda x: x["url"])
+        combine_pdfs_with_outline("final_combined_output.pdf", pdf_info)
 
 
 def combine_pdfs_with_outline(output_filename: str, pdf_info: list):
@@ -82,31 +105,20 @@ def combine_pdfs_with_outline(output_filename: str, pdf_info: list):
             pdf.pages.extend(src.pages)
     pdf.Root.PageMode = Name.UseOutlines
     pdf.save(output_filename)
-    print(f"Combined PDF with outline saved as {output_filename}")
+    print(f"Combined PDF saved as {output_filename}")
 
 
-async def run(root_url: str, exclude: list, max_depth: int):
-    OUTPUT_DIR.mkdir(exist_ok=True)
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        visited, visited_hashes, pdf_info = set(), set(), []
-        await crawl_and_save_pdf(root_url, visited, visited_hashes, browser,
-                                  root_url, 0, max_depth, exclude, pdf_info)
-        await browser.close()
-    if pdf_info:
-        combine_pdfs_with_outline("final_combined_output.pdf", pdf_info)
-
-
-app = typer.Typer()
+app = typer.Typer(add_completion=False)
 
 
 @app.command()
 def main(
-    root_url: str = typer.Argument(..., help="The root URL to start crawling from"),
-    exclude: list[str] = typer.Option([], "-e", "--exclude", help="Link texts to exclude"),
-    level: int = typer.Option(0, "-L", "--level", help="Max depth of the crawl (0 = root only)"),
+    root_url: str = typer.Argument(..., help="Root URL"),
+    exclude: list[str] = typer.Option([], "-e", "--exclude", help="Exclude links"),
+    level: int = typer.Option(1, "-L", "--level", help="Max depth"),
+    concurrency: int = typer.Option(50, "-c", "--concurrency", help="Concurrent pages"),
 ):
-    asyncio.run(run(root_url, exclude or [], level))
+    asyncio.run(run(root_url, exclude, level, concurrency))
 
 
 if __name__ == "__main__":
