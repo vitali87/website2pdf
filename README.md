@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo/wtp.png" alt="WTP Logo" width="200">
+</p>
+
 # Web-to-PDF Crawler
 
 Crawl websites and save them as a single PDF with clickable table of contents.
