@@ -1,0 +1,39 @@
+[project]
+name = "website2pdf"
+version = "1.0.0"
+description = "Web crawler that converts websites into consolidated PDFs with clickable TOC"
+requires-python = ">=3.13"
+dependencies = [
+    "playwright>=1.56.0",
+    "beautifulsoup4>=4.14.3",
+    "pikepdf>=10.0.2",
+    "typer>=0.20.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0.1",
+]
+
+[project.scripts]
+wtp = "main:app"
+
+[tool.uv]
+package = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+addopts = "-v --tb=short"
+markers = [
+    "integration: marks tests as integration tests",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
